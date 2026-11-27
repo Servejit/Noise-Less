@@ -1,0 +1,1 @@
+streamlit\nnoisereduce\nnumpy\nsoundfile\n
