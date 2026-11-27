@@ -1,5 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 streamlit==1.41.1
-noisereduce==3.0.3
 numpy==1.26.4
-scipy==1.13.1
-soundfile==0.12.1
+torch==2.1.2+cpu
+torchaudio==2.1.2+cpu
+deepfilternet==0.5.6
