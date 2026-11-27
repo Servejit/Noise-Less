@@ -1,14 +1,16 @@
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-import noisereduce as nr
-import numpy as np
-import soundfile as sf
 import streamlit as st
 
 
-st.set_page_config(page_title="Noise Less | Video Audio Cleaner", page_icon="🎙️", layout="centered")
+st.set_page_config(
+    page_title="Noise Less | AI Voice Cleaner",
+    page_icon="🎙️",
+    layout="centered",
+)
 
 st.markdown("""
 <style>
@@ -25,90 +27,150 @@ div.stButton > button:hover, div.stDownloadButton > button:hover {
 """, unsafe_allow_html=True)
 
 st.title("🎙️ Noise Less")
-st.subheader("Make your recorded videos sound clearer")
-st.write("Reduce steady background noise, traffic, fan sounds, and other unwanted noise from your video's audio.")
-
-st.warning(
-    "This starter version reduces general background noise. It cannot reliably erase "
-    "a specific nearby speaker, TV music, or barking while perfectly preserving your voice. "
-    "That needs a voice-separation model in a later version."
+st.subheader("AI voice enhancement for your videos")
+st.write(
+    "Reduce unwanted background noise and make speech clearer using "
+    "the open-source DeepFilterNet speech-enhancement model."
 )
 
-upload = st.file_uploader("Choose a video", type=["mp4", "mov", "avi", "mkv", "webm"])
-strength = st.slider(
-    "Noise reduction strength", min_value=0.10, max_value=1.00,
-    value=0.70, step=0.05,
-    help="Higher settings suppress more noise but can make speech sound artificial."
+st.info(
+    "This version uses AI speech enhancement. It is designed to preserve speech "
+    "while reducing noise, but it cannot guarantee perfect removal of every "
+    "TV voice, song, bus sound, or dog bark. Loud overlapping voices may remain."
 )
 
-if upload:
-    video_data = upload.getvalue()
-    st.video(video_data)
+MAX_VIDEO_MB = 100
+upload = st.file_uploader(
+    "Choose a video",
+    type=["mp4", "mov", "avi", "mkv", "webm"],
+    help=f"For the free hosting environment, use videos smaller than {MAX_VIDEO_MB} MB.",
+)
 
-    if st.button("✨ Clean video audio", use_container_width=True):
-        with st.spinner("Extracting and cleaning audio… Keep this page open."):
-            try:
-                suffix = Path(upload.name).suffix or ".mp4"
-                with tempfile.TemporaryDirectory() as folder:
-                    folder = Path(folder)
-                    source = folder / ("source" + suffix)
-                    audio_in = folder / "audio_in.wav"
-                    audio_out = folder / "audio_clean.wav"
-                    video_out = folder / "noise_less_video.mp4"
-                    source.write_bytes(video_data)
+st.caption("Best first test: a short video (10–60 seconds) with speech and background noise.")
 
-                    extract = subprocess.run(
-                        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                         "-i", str(source), "-vn", "-ac", "1", "-ar", "16000",
-                         "-c:a", "pcm_s16le", str(audio_in)],
-                        capture_output=True, text=True
-                    )
-                    if extract.returncode:
-                        raise RuntimeError("Audio extraction failed. Check that the video has an audio track.")
+if upload is not None:
+    if upload.size > MAX_VIDEO_MB * 1024 * 1024:
+        st.error(f"Please upload a video smaller than {MAX_VIDEO_MB} MB.")
+        st.stop()
 
-                    samples, rate = sf.read(audio_in, dtype="float32")
-                    if samples.size == 0:
-                        raise RuntimeError("The video audio track is empty.")
+    st.video(upload.getvalue())
 
-                    cleaned = nr.reduce_noise(
-                        y=samples, sr=rate, stationary=False, prop_decrease=float(strength)
-                    )
-                    cleaned = np.nan_to_num(cleaned)
-                    peak = float(np.max(np.abs(cleaned))) if cleaned.size else 0.0
-                    if peak > 0:
-                        cleaned = cleaned * (0.95 / peak)
-                    sf.write(audio_out, cleaned, rate, subtype="PCM_16")
+    if st.button("✨ Enhance voice and clean video", use_container_width=True):
+        ffmpeg = shutil.which("ffmpeg")
+        deepfilter = shutil.which("deepFilter")
 
-                    mux = subprocess.run(
-                        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                         "-i", str(source), "-i", str(audio_out),
-                         "-map", "0:v:0", "-map", "1:a:0",
-                         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                         "-shortest", "-movflags", "+faststart", str(video_out)],
-                        capture_output=True, text=True
-                    )
-                    if mux.returncode:
-                        raise RuntimeError("Could not export the cleaned video.")
+        if not ffmpeg:
+            st.error("FFmpeg is not installed. Check that packages.txt contains ffmpeg.")
+            st.stop()
+        if not deepfilter:
+            st.error(
+                "DeepFilterNet did not install correctly. Open Manage app → Logs "
+                "and share the dependency installation error."
+            )
+            st.stop()
 
-                    result_video = video_out.read_bytes()
-                    result_audio = audio_out.read_bytes()
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                work = Path(temp_dir)
+                source = work / ("source" + (Path(upload.name).suffix or ".mp4"))
+                audio_input = work / "voice_input.wav"
+                enhanced_dir = work / "enhanced"
+                enhanced_dir.mkdir()
+                video_output = work / "noise_less_cleaned.mp4"
 
-                st.success("Audio cleaning finished!")
-                st.subheader("Cleaned audio preview")
-                st.audio(result_audio)
-                st.subheader("Cleaned video preview")
-                st.video(result_video)
-                st.download_button(
-                    "⬇️ Download cleaned MP4", data=result_video,
-                    file_name="noise_less_cleaned.mp4", mime="video/mp4",
-                    use_container_width=True
+                # Write upload to disk rather than making extra in-memory copies.
+                with source.open("wb") as output_file:
+                    output_file.write(upload.getbuffer())
+
+                progress = st.progress(5, text="Extracting the original audio…")
+
+                extract = subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", str(source), "-vn", "-ac", "1", "-ar", "48000",
+                        "-c:a", "pcm_s16le", str(audio_input),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                if extract.returncode != 0 or not audio_input.exists():
+                    detail = (extract.stderr or "No audio track was found.")[-1200:]
+                    raise RuntimeError(f"Could not extract audio. {detail}")
+
+                progress.progress(25, text="AI is enhancing speech. First run may take longer while the model downloads…")
+
+                # DeepFilterNet3 command-line interface. The model is downloaded
+                # and cached by DeepFilterNet on first use.
+                enhance = subprocess.run(
+                    [
+                        deepfilter, "--pf", "--model-base-dir", "DeepFilterNet3",
+                        "--output-dir", str(enhanced_dir),
+                        "--log-level", "error", str(audio_input),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
                 )
 
-            except FileNotFoundError:
-                st.error("FFmpeg is missing. Confirm that packages.txt contains: ffmpeg")
-            except Exception as exc:
-                st.error(f"Could not process this video: {exc}")
-                st.caption("Try a short MP4 or MOV video with a normal audio track.")
+                if enhance.returncode != 0:
+                    detail = (enhance.stderr or enhance.stdout or "Unknown DeepFilterNet error.")[-1800:]
+                    raise RuntimeError(f"AI speech enhancement failed. {detail}")
+
+                candidates = list(enhanced_dir.glob("*.wav"))
+                if not candidates:
+                    # Some CLI builds write the enhanced WAV beside the input.
+                    candidates = [
+                        p for p in work.glob("*.wav")
+                        if p != audio_input
+                    ]
+                if not candidates:
+                    raise RuntimeError("DeepFilterNet finished but no enhanced WAV file was created.")
+
+                enhanced_audio = candidates[0]
+                progress.progress(70, text="Combining enhanced audio with the original video…")
+
+                mux = subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", str(source), "-i", str(enhanced_audio),
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                        "-map_metadata", "0", "-shortest",
+                        "-movflags", "+faststart", str(video_output),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if mux.returncode != 0 or not video_output.exists():
+                    detail = (mux.stderr or "Video export failed.")[-1200:]
+                    raise RuntimeError(f"Could not create the cleaned video. {detail}")
+
+                progress.progress(90, text="Preparing your download…")
+                # Keep the final result only; do not retain intermediate WAVs.
+                result_size = video_output.stat().st_size
+                if result_size > 150 * 1024 * 1024:
+                    raise RuntimeError("The cleaned video is too large for this free app to prepare safely. Try a shorter or smaller video.")
+
+                result_video = video_output.read_bytes()
+                progress.progress(100, text="Finished!")
+
+            st.success("Your video audio has been enhanced.")
+            st.video(result_video)
+            st.download_button(
+                "⬇️ Download cleaned video",
+                data=result_video,
+                file_name="noise_less_cleaned.mp4",
+                mime="video/mp4",
+                use_container_width=True,
+            )
+
+        except subprocess.TimeoutExpired:
+            st.error("Processing took longer than the free server allows. Try a shorter video.")
+        except Exception as exc:
+            st.error(f"Could not process this video: {exc}")
+            st.caption("If the error mentions model download or DeepFilterNet, share the latest Manage app logs.")
 
 st.divider()
-st.caption("Noise Less • Python + Streamlit • First working version")
+st.caption("Noise Less • DeepFilterNet3 + FFmpeg • Open-source processing")
